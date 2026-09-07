@@ -586,6 +586,20 @@ __D3_SCRIPTS__
   }
   .stat-item { display: flex; gap: 6px; align-items: center; }
   .stat-value { color: #e6edf3; font-weight: 600; }
+  .stat-item.stat-clickable { cursor: pointer; border-radius: 4px; padding: 0 6px; margin: 0 -6px; }
+  .stat-item.stat-clickable:hover { background: rgba(88,166,255,0.15); }
+  #lineage-scale-panel {
+    position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%);
+    background: rgba(13,17,23,0.97); border: 1px solid #30363d; border-radius: 8px;
+    padding: 10px 16px; font-size: 12px; color: #9eaab6; z-index: 20;
+    max-height: 40vh; overflow-y: auto; min-width: 340px; max-width: 80vw;
+    backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  #lineage-scale-panel.hidden { display: none; }
+  #lineage-scale-panel h3 { margin: 0 0 6px; font-size: 12px; color: #e6edf3; }
+  #lineage-scale-panel table { border-collapse: collapse; width: 100%; }
+  #lineage-scale-panel td { padding: 2px 10px 2px 0; white-space: nowrap; }
+  #lineage-scale-panel td.lsp-num { text-align: right; color: #e6edf3; font-weight: 600; }
   #tooltip {
     position: absolute; pointer-events: none;
     background: rgba(22,27,34,0.97); color: #c9d1d9;
@@ -820,6 +834,7 @@ __D3_SCRIPTS__
 <div id="search-results" role="listbox" aria-label="Search results"></div>
 <div id="detail-panel" role="dialog" aria-label="Node detail" aria-modal="false"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content" tabindex="-1"></div></div>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
+<div id="lineage-scale-panel" class="hidden" role="dialog" aria-label="Lineage code scale breakdown"></div>
 <div id="community-legend" aria-label="Community legend"></div>
 <div id="tooltip" role="tooltip" aria-live="polite"></div>
 <div id="help-overlay" class="hidden" role="dialog" aria-label="Help overlay" aria-modal="true">
@@ -948,6 +963,28 @@ var langList = (stats.languages || []).join(", ") || "n/a";
 function si(l, v) { return '<div class="stat-item"><span class="tt-label">' + escH(l) + '</span> <span class="stat-value">' + escH(String(v)) + '</span></div>'; }
 statsBar.textContent = "";
 statsBar.insertAdjacentHTML("beforeend", si("Nodes", stats.total_nodes) + si("Edges", stats.total_edges) + si("Files", stats.files_count) + si("Languages", langList));
+/* Lineage code-scale stats: present only in `lineage --html` output. */
+var lineageScale = graphData.lineage_scale;
+if (lineageScale && lineageScale.function_level) {
+  var lsFn = lineageScale.function_level;
+  var lsFiles = (lineageScale.file_level && lineageScale.file_level.files) || [];
+  statsBar.insertAdjacentHTML("beforeend",
+    si("Lineage Fns", lsFn.function_count) +
+    '<div class="stat-item stat-clickable" id="stat-lineage-loc" role="button" tabindex="0" title="Toggle per-file breakdown"><span class="tt-label">Lineage LOC</span> <span class="stat-value">' + escH(String(lsFn.total_loc)) + '</span></div>');
+  var lsPanel = document.getElementById("lineage-scale-panel");
+  var lsRows = lsFiles.map(function(f) {
+    var shortPath = (f.file_path || "").split("/").slice(-3).join("/");
+    return '<tr><td title="' + escH(f.file_path || "") + '">' + escH(shortPath) + '</td>' +
+      '<td class="lsp-num">' + f.functions + ' fns</td><td class="lsp-num">' + f.loc + ' LOC</td></tr>';
+  }).join("");
+  lsPanel.innerHTML = '<h3>Lineage Code Scale — ' + lsFn.function_count + ' functions, ' + lsFn.total_loc + ' LOC' +
+    (lsFn.external_references ? ' (+' + lsFn.external_references + ' external refs)' : '') + '</h3>' +
+    '<table>' + lsRows + '</table>';
+  var lsToggle = document.getElementById("stat-lineage-loc");
+  function toggleLsPanel() { lsPanel.classList.toggle("hidden"); }
+  lsToggle.addEventListener("click", toggleLsPanel);
+  lsToggle.addEventListener("keydown", function(ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggleLsPanel(); } });
+}
 var tooltip = document.getElementById("tooltip");
 function showTooltip(ev, d) {
   var bg = communityColoringOn && d.community_id != null ? communityColorScale(d.community_id) : (KIND_COLOR[d.kind] || "#555");
@@ -1383,6 +1420,60 @@ svg.on("click", function() {
   document.getElementById("legend").style.display = "";
   if (detailTrigger) detailTrigger.focus();
 });
+var _callsAdj = null;
+function getCallsAdjacency() {
+  if (_callsAdj) return _callsAdj;
+  var out = new Map(), inc = new Map();
+  edges.forEach(function(e) {
+    if (e.kind !== "CALLS") return;
+    var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
+    var t = typeof e.target === "object" ? e.target.qualified_name : e._target;
+    if (!s || !t) return;
+    if (!out.has(s)) out.set(s, new Set());
+    out.get(s).add(t);
+    if (!inc.has(t)) inc.set(t, new Set());
+    inc.get(t).add(s);
+  });
+  _callsAdj = { out: out, inc: inc };
+  return _callsAdj;
+}
+function computeNodeLineage(rootQn) {
+  // Mirror the CLI `lineage` semantics: two direction-pure BFS traversals —
+  // callers chain upward only, callees chain downward only. A full
+  // weakly-connected closure would explode through hub utility functions.
+  var adj = getCallsAdjacency();
+  var visited = new Set([rootQn]);
+  function bfs(startQn, adjMap) {
+    var queue = [startQn];
+    var seen = new Set([startQn]);
+    while (queue.length) {
+      var qn = queue.shift();
+      var next = adjMap.get(qn);
+      if (!next) continue;
+      next.forEach(function(nxt) {
+        if (!seen.has(nxt)) { seen.add(nxt); visited.add(nxt); queue.push(nxt); }
+      });
+    }
+  }
+  bfs(rootQn, adj.out);  // downstream: callees of callees
+  bfs(rootQn, adj.inc);  // upstream: callers of callers
+  var FN_KINDS = { Function: 1, Method: 1, Test: 1 };
+  var fnCount = 0, totalLoc = 0, fileMap = new Map();
+  visited.forEach(function(qn) {
+    var n = nodeById.get(qn);
+    if (!n || !FN_KINDS[n.kind]) return;
+    if (typeof n.line_start !== "number" || typeof n.line_end !== "number") return;
+    var loc = Math.max(0, n.line_end - n.line_start + 1);
+    fnCount++;
+    totalLoc += loc;
+    var fp = n.file_path || "(unknown)";
+    if (!fileMap.has(fp)) fileMap.set(fp, { file: fp, fns: 0, loc: 0 });
+    var rec = fileMap.get(fp);
+    rec.fns++; rec.loc += loc;
+  });
+  var files = Array.from(fileMap.values()).sort(function(a, b) { return b.loc - a.loc; });
+  return { fnCount: fnCount, loc: totalLoc, files: files };
+}
 function showDetailPanel(d) {
   detailTrigger = document.activeElement;
   var callers = [], callees = [];
@@ -1412,6 +1503,20 @@ function showDetailPanel(d) {
     h += '<div class="dp-section"><h4>Callees (' + callees.length + ')</h4><ul class="dp-list">';
     callees.slice(0, 20).forEach(function(c) { h += '<li data-qn="' + escH(c.qualified_name) + '">' + escH(c.label) + '</li>'; });
     h += '</ul></div>';
+  }
+  if (callers.length || callees.length) {
+    var lin = computeNodeLineage(d.qualified_name);
+    if (lin && lin.fnCount > 0) {
+      h += '<div class="dp-section"><h4>Lineage Scale</h4>';
+      h += '<div class="dp-meta">' + lin.fnCount + ' functions &middot; ' + lin.loc.toLocaleString() + ' LOC &middot; ' + lin.files.length + ' files (callers + callees chains)</div>';
+      h += '<ul class="dp-list">';
+      lin.files.slice(0, 8).forEach(function(f) {
+        var short = f.file.split("/").slice(-3).join("/");
+        h += '<li>' + escH(short) + ' <span class="tt-label">&mdash; ' + f.fns + ' fns, ' + f.loc.toLocaleString() + ' LOC</span></li>';
+      });
+      if (lin.files.length > 8) h += '<li><span class="tt-label">&hellip; and ' + (lin.files.length - 8) + ' more files</span></li>';
+      h += '</ul></div>';
+    }
   }
   dpContent.textContent = "";
   dpContent.insertAdjacentHTML("beforeend", h);

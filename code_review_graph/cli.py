@@ -538,6 +538,8 @@ _GRAPH_TOOL_COMMANDS = {
     "architecture",
     "large-functions",
     "refactor",
+    "lineage",
+    "lineage-agg",
 }
 
 
@@ -665,6 +667,65 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             limit=args.limit,
             repo_root=root,
         )
+    elif args.command == "lineage":
+        from .lineage import (
+            function_lineage,
+            render_lineage_html,
+            render_lineage_text,
+        )
+
+        if not args.package and not args.file:
+            print(
+                "Error: at least one of --package or --file is required to "
+                "scope the function lookup.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        result = function_lineage(
+            package=args.package or "",
+            file_path=args.file or "",
+            function=args.function,
+            repo_root=root,
+            max_depth=args.depth,
+        )
+        if args.html and result.get("status") == "ok":
+            html_path = render_lineage_html(result, args.html, repo_root=root)
+            result["html_path"] = str(html_path)
+        elif args.html:
+            print(
+                f"Skipping --html: lineage result status is "
+                f"'{result.get('status')}'.",
+                file=sys.stderr,
+            )
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(render_lineage_text(result))
+            if result.get("html_path"):
+                print(f"\nHTML 血缘图已生成: {result['html_path']}")
+        return
+    elif args.command == "lineage-agg":
+        from .lineage import render_lineage_agg_text, scope_lineage
+
+        if not args.scope:
+            print(
+                "Error: --scope is required to name the file or directory "
+                "to aggregate.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        result = scope_lineage(
+            scope=args.scope,
+            repo_root=root,
+            exclude_tests=args.exclude_tests,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(render_lineage_agg_text(result))
+        return
     else:
         result = tools.refactor_func(
             mode=args.mode,
@@ -1164,6 +1225,79 @@ def main() -> None:
     )
     search_cmd.add_argument("--limit", type=_positive_int, default=20)
     search_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
+    lineage_cmd = sub.add_parser(
+        "lineage",
+        help="Trace one function's bidirectional call lineage within a package",
+    )
+    lineage_cmd.add_argument(
+        "--package",
+        required=False,
+        default="",
+        help=(
+            "Package/directory path used to filter candidate files "
+            "(optional when --file is provided)"
+        ),
+    )
+    lineage_cmd.add_argument(
+        "--file",
+        required=False,
+        default="",
+        help=(
+            "File path filter: bare filename (utils.py), repo-relative "
+            "(code_review_graph/tools/utils.py), or absolute path. "
+            "Matches by contiguous path segments; optional when --package "
+            "is provided"
+        ),
+    )
+    lineage_cmd.add_argument(
+        "--function",
+        required=True,
+        help="Exact function name to locate within the scope",
+    )
+    lineage_cmd.add_argument(
+        "--depth",
+        type=_positive_int,
+        default=None,
+        help="Max expansion depth per direction (default: unlimited)",
+    )
+    lineage_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the raw JSON result instead of the text tree",
+    )
+    lineage_cmd.add_argument(
+        "--html",
+        default=None,
+        help="Also write an interactive HTML lineage graph to this path",
+    )
+    lineage_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
+    lineage_agg_cmd = sub.add_parser(
+        "lineage-agg",
+        help="Aggregate lineage coverage across all functions in a file or folder",
+    )
+    lineage_agg_cmd.add_argument(
+        "--scope",
+        required=True,
+        help=(
+            "File or directory path to aggregate: repo-relative "
+            "(code_review_graph/tools), absolute, or a bare filename. "
+            "A directory is traversed recursively; a file covers just that "
+            "file"
+        ),
+    )
+    lineage_agg_cmd.add_argument(
+        "--exclude-tests",
+        action="store_true",
+        help="Exclude Test nodes from the root set and the reported scale",
+    )
+    lineage_agg_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the raw JSON result instead of the text summary",
+    )
+    lineage_agg_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     flows_cmd = sub.add_parser("flows", help="List stored execution flows")
     flows_cmd.add_argument(
